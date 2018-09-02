@@ -48,7 +48,7 @@ workspaces.
 get_outputs::
 Gets the current outputs. The reply will be a JSON-encoded list of outputs (see
 the reply section of docs/ipc, e.g. at
-http://i3wm.org/docs/ipc.html#_receiving_replies_from_i3).
+https://i3wm.org/docs/ipc.html#_receiving_replies_from_i3).
 
 get_tree::
 Gets the layout tree. i3 uses a tree as data structure which includes every
@@ -62,9 +62,18 @@ get_bar_config::
 Gets the configuration (as JSON map) of the workspace bar with the given ID. If
 no ID is provided, an array with all configured bar IDs is returned instead.
 
+get_binding_modes::
+Gets a list of configured binding modes.
+
 get_version::
 Gets the version of i3. The reply will be a JSON-encoded dictionary with the
 major, minor, patch and human-readable version.
+
+get_config::
+Gets the currently loaded i3 configuration.
+
+send_tick::
+Sends a tick to all IPC connections which subscribe to tick events.
 
 == DESCRIPTION
 

@@ -7,6 +7,8 @@
  * ipc.c: Communicating with i3
  *
  */
+#include "common.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -20,8 +22,6 @@
 #ifdef I3_ASAN_ENABLED
 #include <sanitizer/lsan_interface.h>
 #endif
-
-#include "common.h"
 
 ev_io *i3_connection;
 
@@ -63,6 +63,9 @@ void got_subscribe_reply(char *reply) {
  *
  */
 void got_output_reply(char *reply) {
+    DLOG("Clearing old output configuration...\n");
+    free_outputs();
+
     DLOG("Parsing outputs JSON...\n");
     parse_outputs_json(reply);
     DLOG("Reconfiguring windows...\n");
@@ -71,6 +74,10 @@ void got_output_reply(char *reply) {
     i3_output *o_walk;
     SLIST_FOREACH(o_walk, outputs, slist) {
         kick_tray_clients(o_walk);
+    }
+
+    if (!config.disable_ws) {
+        i3_send_msg(I3_IPC_MESSAGE_TYPE_GET_WORKSPACES, NULL);
     }
 
     draw_bars(false);
@@ -103,18 +110,22 @@ void got_bar_config(char *reply) {
     init_colors(&(config.colors));
 
     start_child(config.command);
-    FREE(config.command);
 }
 
 /* Data structure to easily call the reply handlers later */
 handler_t reply_handlers[] = {
-    &got_command_reply,
-    &got_workspace_reply,
-    &got_subscribe_reply,
-    &got_output_reply,
-    NULL,
-    NULL,
-    &got_bar_config,
+    &got_command_reply,   /* I3_IPC_REPLY_TYPE_COMMAND */
+    &got_workspace_reply, /* I3_IPC_REPLY_TYPE_WORKSPACES */
+    &got_subscribe_reply, /* I3_IPC_REPLY_TYPE_SUBSCRIBE */
+    &got_output_reply,    /* I3_IPC_REPLY_TYPE_OUTPUTS */
+    NULL,                 /* I3_IPC_REPLY_TYPE_TREE */
+    NULL,                 /* I3_IPC_REPLY_TYPE_MARKS */
+    &got_bar_config,      /* I3_IPC_REPLY_TYPE_BAR_CONFIG */
+    NULL,                 /* I3_IPC_REPLY_TYPE_VERSION */
+    NULL,                 /* I3_IPC_REPLY_TYPE_BINDING_MODES */
+    NULL,                 /* I3_IPC_REPLY_TYPE_CONFIG */
+    NULL,                 /* I3_IPC_REPLY_TYPE_TICK */
+    NULL,                 /* I3_IPC_REPLY_TYPE_SYNC */
 };
 
 /*
@@ -168,6 +179,7 @@ void got_bar_config_update(char *event) {
 
     /* update the configuration with the received settings */
     DLOG("Received bar config update \"%s\"\n", event);
+    char *old_command = config.command ? sstrdup(config.command) : NULL;
     bar_display_mode_t old_mode = config.hide_on_modifier;
     parse_config_json(event);
     if (old_mode != config.hide_on_modifier) {
@@ -177,6 +189,13 @@ void got_bar_config_update(char *event) {
     /* update fonts and colors */
     init_xcb_late(config.fontname);
     init_colors(&(config.colors));
+
+    /* restart status command process */
+    if (old_command && strcmp(old_command, config.command) != 0) {
+        kill_child();
+        start_child(config.command);
+    }
+    free(old_command);
 
     draw_bars(false);
 }
@@ -290,7 +309,7 @@ int i3_send_msg(uint32_t type, const char *payload) {
     char *buffer = smalloc(to_write);
     char *walk = buffer;
 
-    strncpy(buffer, I3_IPC_MAGIC, strlen(I3_IPC_MAGIC));
+    memcpy(buffer, I3_IPC_MAGIC, strlen(I3_IPC_MAGIC));
     walk += strlen(I3_IPC_MAGIC);
     memcpy(walk, &len, sizeof(uint32_t));
     walk += sizeof(uint32_t);

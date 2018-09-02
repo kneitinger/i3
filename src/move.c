@@ -1,5 +1,3 @@
-#undef I3__FILE__
-#define I3__FILE__ "move.c"
 /*
  * vim:ts=4:sw=4:expandtab
  *
@@ -11,20 +9,111 @@
  */
 #include "all.h"
 
-typedef enum { BEFORE,
-               AFTER } position_t;
+/*
+ * Returns the lowest container in the tree that has both a and b as descendants.
+ *
+ */
+static Con *lowest_common_ancestor(Con *a, Con *b) {
+    Con *parent_a = a;
+    while (parent_a) {
+        Con *parent_b = b;
+        while (parent_b) {
+            if (parent_a == parent_b) {
+                return parent_a;
+            }
+            parent_b = parent_b->parent;
+        }
+        parent_a = parent_a->parent;
+    }
+    assert(false);
+}
+
+/*
+ * Returns the direct child of ancestor that contains con.
+ *
+ */
+static Con *child_containing_con_recursively(Con *ancestor, Con *con) {
+    Con *child = con;
+    while (child && child->parent != ancestor) {
+        child = child->parent;
+        assert(child->parent);
+    }
+    return child;
+}
+
+/*
+ * Returns true if the given container is the focused descendant of ancestor, recursively.
+ *
+ */
+static bool is_focused_descendant(Con *con, Con *ancestor) {
+    Con *current = con;
+    while (current != ancestor) {
+        if (TAILQ_FIRST(&(current->parent->focus_head)) != current) {
+            return false;
+        }
+        current = current->parent;
+        assert(current->parent);
+    }
+    return true;
+}
 
 /*
  * This function detaches 'con' from its parent and inserts it either before or
  * after 'target'.
  *
  */
-static void insert_con_into(Con *con, Con *target, position_t position) {
+void insert_con_into(Con *con, Con *target, position_t position) {
     Con *parent = target->parent;
     /* We need to preserve the old con->parent. While it might still be used to
      * insert the entry before/after it, we call the on_remove_child callback
      * afterwards which might then close the con if it is empty. */
     Con *old_parent = con->parent;
+
+    /* We compare the focus order of the children of the lowest common ancestor. If con or
+     * its ancestor is before target's ancestor then con should be placed before the target
+     * in the focus stack. */
+    Con *lca = lowest_common_ancestor(con, parent);
+    if (lca == con) {
+        ELOG("Container is being inserted into one of its descendants.\n");
+        return;
+    }
+
+    Con *con_ancestor = child_containing_con_recursively(lca, con);
+    Con *target_ancestor = child_containing_con_recursively(lca, target);
+    bool moves_focus_from_ancestor = is_focused_descendant(con, con_ancestor);
+    bool focus_before;
+
+    /* Determine if con is going to be placed before or after target in the parent's focus stack. */
+    if (con_ancestor == target_ancestor) {
+        /* Happens when the target is con's old parent. Eg with layout V [ A H [ B C ] ],
+         * if we move C up. Target will be H. */
+        focus_before = moves_focus_from_ancestor;
+    } else {
+        /* Look at the focus stack order of the children of the lowest common ancestor. */
+        Con *current;
+        TAILQ_FOREACH(current, &(lca->focus_head), focused) {
+            if (current == con_ancestor || current == target_ancestor) {
+                break;
+            }
+        }
+        focus_before = (current == con_ancestor);
+    }
+
+    /* If con is the focused container in our old ancestor we place the new ancestor
+     * before the old ancestor in the focus stack. Example:
+     * Consider the layout [ H [ V1 [ A* B ] V2 [ C ] ] ] where A is focused. We move to
+     * a second workspace and from there we move A to the right and switch back to the
+     * original workspace. Without the change focus would move to B instead of staying
+     * with A. */
+    if (moves_focus_from_ancestor && focus_before) {
+        Con *place = TAILQ_PREV(con_ancestor, focus_head, focused);
+        TAILQ_REMOVE(&(lca->focus_head), target_ancestor, focused);
+        if (place) {
+            TAILQ_INSERT_AFTER(&(lca->focus_head), place, target_ancestor, focused);
+        } else {
+            TAILQ_INSERT_HEAD(&(lca->focus_head), target_ancestor, focused);
+        }
+    }
 
     con_detach(con);
     con_fix_percent(con->parent);
@@ -48,12 +137,28 @@ static void insert_con_into(Con *con, Con *target, position_t position) {
 
     con->parent = parent;
 
+    if (parent == lca) {
+        if (focus_before) {
+            /* Example layout: H [ A B* ], we move A up/down. 'target' will be H. */
+            TAILQ_INSERT_BEFORE(target, con, focused);
+        } else {
+            /* Example layout: H [ A B* ], we move A up/down. 'target' will be H. */
+            TAILQ_INSERT_AFTER(&(parent->focus_head), target, con, focused);
+        }
+    } else {
+        if (focus_before) {
+            /* Example layout: V [ H [ A B ] C* ], we move C up. 'target' will be A. */
+            TAILQ_INSERT_HEAD(&(parent->focus_head), con, focused);
+        } else {
+            /* Example layout: V [ H [ A* B ] C ], we move C up. 'target' will be A. */
+            TAILQ_INSERT_TAIL(&(parent->focus_head), con, focused);
+        }
+    }
+
     if (position == BEFORE) {
         TAILQ_INSERT_BEFORE(target, con, nodes);
-        TAILQ_INSERT_HEAD(&(parent->focus_head), con, focused);
     } else if (position == AFTER) {
         TAILQ_INSERT_AFTER(&(parent->nodes_head), target, con, nodes);
-        TAILQ_INSERT_HEAD(&(parent->focus_head), con, focused);
     }
 
     /* Pretend the con was just opened with regards to size percent values.
@@ -101,8 +206,7 @@ static void attach_to_workspace(Con *con, Con *ws, direction_t direction) {
  */
 static void move_to_output_directed(Con *con, direction_t direction) {
     Con *old_ws = con_get_workspace(con);
-    Con *current_output_con = con_get_output(con);
-    Output *current_output = get_output_by_name(current_output_con->name);
+    Output *current_output = get_output_for_con(con);
     Output *output = get_output_next(direction, current_output, CLOSEST_OUTPUT);
 
     if (!output) {
@@ -121,7 +225,7 @@ static void move_to_output_directed(Con *con, direction_t direction) {
     attach_to_workspace(con, ws, direction);
 
     /* fix the focus stack */
-    con_focus(con);
+    con_activate(con);
 
     /* force re-painting the indicators */
     FREE(con->deco_render_params);
@@ -149,13 +253,19 @@ void tree_move(Con *con, int direction) {
         return;
     }
 
-    if (con->parent->type == CT_WORKSPACE && con_num_children(con->parent) == 1) {
+    if (con->fullscreen_mode == CF_GLOBAL) {
+        DLOG("Not moving fullscreen global container\n");
+        return;
+    }
+
+    if ((con->fullscreen_mode == CF_OUTPUT) ||
+        (con->parent->type == CT_WORKSPACE && con_num_children(con->parent) == 1)) {
         /* This is the only con on this workspace */
         move_to_output_directed(con, direction);
         return;
     }
 
-    orientation_t o = (direction == D_LEFT || direction == D_RIGHT ? HORIZ : VERT);
+    orientation_t o = orientation_from_direction(direction);
 
     Con *same_orientation = con_parent_with_orientation(con, o);
     /* The do {} while is used to 'restart' at this point with a different
@@ -251,7 +361,8 @@ void tree_move(Con *con, int direction) {
                         ? AFTER
                         : BEFORE);
         insert_con_into(con, target, position);
-    } else if (con->parent->parent->type == CT_WORKSPACE &&
+    } else if (!next &&
+               con->parent->parent->type == CT_WORKSPACE &&
                con->parent->layout != L_DEFAULT &&
                con_num_children(con->parent) == 1) {
         /* Con is the lone child of a non-default layout container at the edge
@@ -266,11 +377,6 @@ void tree_move(Con *con, int direction) {
     }
 
 end:
-    /* We need to call con_focus() to fix the focus stack "above" the container
-     * we just inserted the focused container into (otherwise, the parent
-     * container(s) would still point to the old container(s)). */
-    con_focus(con);
-
     /* force re-painting the indicators */
     FREE(con->deco_render_params);
 

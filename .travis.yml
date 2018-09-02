@@ -1,5 +1,8 @@
-sudo: required
+sudo: false
 dist: trusty
+# TODO: remove “group” once trusty kernel is no longer affected by
+# https://github.com/google/sanitizers/issues/837
+group: deprecated-2017Q3
 services:
   - docker
 language: c
@@ -32,14 +35,13 @@ install:
 script:
   - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/check-safe-wrappers.sh
   - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/check-formatting.sh
-  - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 -e CC -e CFLAGS="-Wformat -Wformat-security -Wextra -Wno-unused-parameter -Werror" ${BASENAME} make all mans -j ASAN=1
+  - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 -e CC ${BASENAME} /bin/sh -c 'autoreconf -fi && mkdir -p build && cd build && (../configure || (cat config.log; false)) && make -j CFLAGS="-Wformat -Wformat-security -Wextra -Wno-unused-parameter -Werror"'
   - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/check-spelling.pl
-  - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/run-tests.sh
+  - docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 -e CC ${BASENAME} ./travis/run-tests.sh
   - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/debian-build.sh deb/debian-amd64/DIST
   - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME_UBUNTU} ./travis/debian-build.sh deb/ubuntu-amd64/DIST
   - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME_386} linux32 ./travis/debian-build.sh deb/debian-i386/DIST
   - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME_UBUNTU_386} linux32 ./travis/debian-build.sh deb/ubuntu-i386/DIST
-  - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/clang-analyze.sh
   - ./travis/skip-pkg.sh || docker run -v $PWD:/usr/src/i3/ -w /usr/src/i3 ${BASENAME} ./travis/docs.sh
   - ./travis/skip-pkg.sh || travis/prep-bintray.sh
 
